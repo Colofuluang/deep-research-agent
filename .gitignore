@@ -1,0 +1,36 @@
+# Credentials
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# Runtime research data
+outputs/
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+
+# Local/editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+*.log
