@@ -1,6 +1,7 @@
 # 读取配置：模型、API 密钥、研究预算
-import os 
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

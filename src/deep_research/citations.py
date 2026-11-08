@@ -1,5 +1,7 @@
 import re
-from .models import TaskResearch, SearchResult
+
+from .models import SearchResult, TaskResearch
+
 
 def resolve_source(
     citation_id: str,
@@ -26,14 +28,13 @@ def resolve_source(
 
     return research.sources[source_number - 1]
 
+
 def extract_citation_ids(report: str) -> set[str]:
     """提取报告中的引用编号，自动去重。"""
     return set(re.findall(r"\[(T\d+-S\d+)\]", report))
 
-def find_invalid_citations(
-    report: str,
-    records: list[TaskResearch]
-) -> list[str]:
+
+def find_invalid_citations(report: str, records: list[TaskResearch]) -> list[str]:
     valid_ids = set()
     for task_index, research in enumerate(records, start=1):
         for source_index, source in enumerate(research.sources, start=1):

@@ -1,96 +1,63 @@
-
-export async function previewResearch(topic) {
-  const response = await fetch('/api/research/preview', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic }),
-  })
-
+async function requestJson(url, options) {
+  const response = await fetch(url, options)
   if (!response.ok) {
-    throw new Error(`请求失败：HTTP ${response.status}`)
+    let detail
+    try { detail = (await response.json()).detail } catch { /* Some proxies return plain text. */ }
+    throw new Error(typeof detail === 'string' ? detail : `研究请求失败：HTTP ${response.status}`)
   }
-
-  return await response.json()
+  return response.json()
 }
 
-async function requestResearchStream(url, options, onEvent) {
-  // 发送研究请求
-  const response = await fetch(url, options)
+export const createResearchJob = (topic, requestId) => requestJson('/api/research/jobs', {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ topic, request_id: requestId }),
+})
+export const resumeResearchJob = (runId) => requestJson(`/api/research/${encodeURIComponent(runId)}/jobs`, { method: 'POST' })
+export const listResearchJobs = () => requestJson('/api/research/jobs?include_deleted=true')
+export const deleteResearchRun = (runId) => requestJson(`/api/research/${encodeURIComponent(runId)}`, { method: 'DELETE' })
+export const getResearchJob = (jobId) => requestJson(`/api/research/jobs/${encodeURIComponent(jobId)}`)
+export const stopResearchJob = (jobId) => requestJson(`/api/research/jobs/${encodeURIComponent(jobId)}/stop`, { method: 'POST' })
 
-  if (!response.ok) {
-    throw new Error('研究请求失败：HTTP ' + response.status)
-  }
-  if (!response.body) {
-    throw new Error('浏览器未提供响应流')
-  }
-
-  // 准备读取响应
+export async function subscribeResearchJob(jobId, onEvent, { after = 0, signal } = {}) {
+  const response = await fetch(`/api/research/jobs/${encodeURIComponent(jobId)}/events?after=${after}`, {
+    headers: { Accept: 'text/event-stream' }, signal,
+  })
+  if (!response.ok) throw new Error(`进度订阅失败：HTTP ${response.status}`)
+  if (!response.body) throw new Error('浏览器未提供响应流')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-
+  const cancelReader = () => { void reader.cancel().catch(() => {}) }
+  signal?.addEventListener('abort', cancelReader, { once: true })
   try {
-    while (true) {
+    while (!signal?.aborted) {
       const { value, done } = await reader.read()
-
       if (done) {
-        throw new Error('连接已结束，但未收到研究完成或失败事件')
+        if (signal?.aborted) return
+        throw new Error('进度连接已结束，后台任务状态将重新同步')
       }
-
       buffer += decoder.decode(value, { stream: true })
-
-      // 从暂存内容中取出完整事件
-      let boundary = buffer.indexOf('\n\n')
-
-      while (boundary !== -1) {
-        const block = buffer.slice(0, boundary)
+      buffer = buffer.replace(/\r\n/g, '\n')
+      let boundary
+      while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+        const lines = buffer.slice(0, boundary).split('\n')
         buffer = buffer.slice(boundary + 2)
-
-        const lines = block.split('\n')
-        const eventLine = lines.find((line) => line.startsWith('event:'))
-        const dataLine = lines.find((line) => line.startsWith('data:'))
-
-        if (dataLine) {
-          const event = {
-            event: eventLine ? eventLine.slice(6).trim() : 'message',
-            data: JSON.parse(dataLine.slice(5).trim()),
-          }
-
-          // 把事件交给页面处理
-          onEvent(event)
-
-          if (event.event === 'completed' || event.event === 'error') {
-            return
-          }
+        const data = lines.filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n')
+        if (!data) continue
+        const id = Number(lines.find(line => line.startsWith('id:'))?.slice(3).trim())
+        const event = {
+          id: Number.isSafeInteger(id) && id >= 0 ? id : null,
+          event: lines.find(line => line.startsWith('event:'))?.slice(6).trim() || 'message',
+          data: JSON.parse(data),
         }
-
-        boundary = buffer.indexOf('\n\n')
+        onEvent(event)
+        if (event.event === 'completed' || event.event === 'error'
+          || (event.event === 'job_status' && ['completed', 'stopped', 'failed', 'interrupted', 'deleted'].includes(event.data.status))) return
       }
     }
   } finally {
+    signal?.removeEventListener('abort', cancelReader)
     await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
-}
-
-export async function streamResearch(topic, onEvent) {
-  return await requestResearchStream('/api/research/stream', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
-    body: JSON.stringify({ topic }),
-  }, onEvent)
-}
-
-export async function resumeResearch(runId, onEvent) {
-  return await requestResearchStream(
-    '/api/research/' + encodeURIComponent(runId) + '/resume',
-    {
-      method: 'POST',
-      headers: { Accept: 'text/event-stream' },
-    },
-    onEvent,
-  )
 }

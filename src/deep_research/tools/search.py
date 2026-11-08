@@ -1,5 +1,6 @@
 from tavily import TavilyClient
 from tavily.errors import TimeoutError as TavilyTimeoutError
+
 from ..config import TAVILY_API_KEY
 from ..models import SearchResult
 
@@ -12,9 +13,7 @@ def search_web(query: str) -> list[SearchResult]:
         raise ValueError("查询词不能为空")
 
     if not TAVILY_API_KEY:
-        raise ValueError(
-            "请在项目根目录的 .env 中配置 TAVILY_API_KEY"
-        )
+        raise ValueError("请在项目根目录的 .env 中配置 TAVILY_API_KEY")
 
     try:
         client = TavilyClient(api_key=TAVILY_API_KEY)
@@ -29,12 +28,11 @@ def search_web(query: str) -> list[SearchResult]:
         )
     except TavilyTimeoutError:
         raise TimeoutError("Tavily 搜索超时") from None
-        
+
     except Exception as exc:
         # 在 SDK 调用边界保留错误类型，不输出可能包含密钥的原始错误。
         raise RuntimeError(
-            f"Tavily 搜索失败（{type(exc).__name__}），"
-            "请检查密钥、额度与网络"
+            f"Tavily 搜索失败（{type(exc).__name__}），请检查密钥、额度与网络"
         ) from None
 
     results = []
@@ -58,15 +56,3 @@ def search_web(query: str) -> list[SearchResult]:
         )
 
     return results
-
-
-if __name__ == "__main__":
-    results = search_web("AI Agent 的架构与核心组件")
-
-    if not results:
-        print("没有相关结果")
-
-    for index, result in enumerate(results, start=1):
-        print(f"\n[{index}] {result.title}")
-        print(f"链接：{result.url}")
-        print(f"摘要：{result.snippet}")

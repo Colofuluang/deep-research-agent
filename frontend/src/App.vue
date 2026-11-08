@@ -1,155 +1,293 @@
 <script setup>
-import { ref } from 'vue'
-import { streamResearch, resumeResearch } from './api.js'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useResearch } from './useResearch.js'
+import { renderMarkdown } from './markdown.js'
 
-const topic = ref('')
-const message = ref('')
-const sending = ref(false)
-const runId = ref('')
-const logs = ref([])
-const report = ref('')
-const resumeId = ref('')
+const research = useResearch()
+const {
+  topic, resumeId, inputError, resumeError, storageNotice,
+  history, activeResearch, report, sending,
+} = research
+const reportOpen = ref(false)
+watch(() => activeResearch.value?.id, () => { reportOpen.value = false })
+const sidebarOpen = ref(false)
+const reportBack = ref(null)
+const reportLaunch = ref(null)
+const composerInput = ref(null)
+const sidebarElement = ref(null)
+const sidebarToggle = ref(null)
+const sidebarClose = ref(null)
+const reportHtml = computed(() => renderMarkdown(report.value))
+const summaryHtml = computed(() => renderMarkdown(activeResearch.value?.reportSummary ?? ''))
+const completedCount = computed(() => activeResearch.value?.tasks.filter((task) => task.status === 'completed').length ?? 0)
+const statusLabels = { submitting: '正在提交', queued: '排队中', waiting: '等待执行', running: '执行中', stopping: '停止中', stopped: '已停止', completed: '已完成', failed: '执行失败', interrupted: '已中断' }
+const progressLabel = computed(() => ({ queued: '等待后台执行', running: '研究进行中', stopping: '正在停止研究', stopped: '研究已停止', completed: '研究已完成' })[activeResearch.value?.status] ?? '研究已中断')
+const composerAction = computed(() => {
+  const entry = activeResearch.value
+  if (entry?.status === 'submitting') return 'submitting'
+  if (entry?.status === 'stopping') return 'stopping'
+  if (entry?.jobId && ['queued', 'running'].includes(entry.status)) return 'stop'
+  if (entry?.runId && (['stopped', 'interrupted', 'failed'].includes(entry.status) || (entry.status === 'completed' && !report.value))) return 'resume'
+  return 'send'
+})
+const composerLabel = computed(() => ({
+  send: '开始研究', stop: '停止研究', stopping: '正在停止研究', submitting: '正在提交研究',
+  resume: activeResearch.value?.status === 'completed' ? '读取报告' : '恢复研究',
+})[composerAction.value])
+const composerDisabled = computed(() => activeResearch.value?.deleting || (composerAction.value === 'send'
+  ? sending.value || !topic.value.trim() : ['submitting', 'stopping'].includes(composerAction.value)))
+const composerHint = computed(() => composerAction.value === 'resume'
+  ? `点击右侧三角${activeResearch.value?.status === 'completed' ? '读取报告' : '继续研究'}，或新建研究`
+  : sending.value ? '任务在后台执行，可新建研究或切换其他记录'
+    : activeResearch.value ? '发送新主题将创建另一项研究' : 'Enter 开始研究 · Shift + Enter 换行')
+let conversationScroll = 0
 
-function handleResearchEvent(event) {
-    const data = event.data
-
-    if (event.event === 'started') {
-      runId.value = data.run_id
-      resumeId.value = data.run_id
-      topic.value = data.topic
-      message.value = data.mode === 'resume'
-        ? '正在恢复研究'
-        : '研究已启动'
-    } else if (event.event === 'progress') {
-        logs.value.push(data.message)
-    } else if (event.event === 'completed') {
-        report.value = data.report
-        message.value = '研究已完成'
-    } else if (event.event === 'error') {
-        message.value = '研究失败：' + data.message
-    }
+function scrollTo(top) {
+  if (typeof window !== 'undefined') window.scrollTo({ top, behavior: 'auto' })
 }
 
+function openSidebar() {
+  sidebarOpen.value = true
+  nextTick(() => sidebarClose.value?.focus())
+}
 
+function closeSidebar() {
+  const wasOpen = sidebarOpen.value
+  sidebarOpen.value = false
+  if (wasOpen) nextTick(() => sidebarToggle.value?.focus())
+}
+
+function onSidebarTab(event) {
+  if (!sidebarOpen.value) return
+  const controls = [...sidebarElement.value.querySelectorAll('button:not([disabled]), input:not([disabled]), summary')]
+    // Closed details can retain layout rectangles for inputs that cannot receive focus.
+    .filter((element) => element.checkVisibility
+      ? element.checkVisibility()
+      : element.getClientRects().length && (element.tagName === 'SUMMARY' || !element.closest('details:not([open])')))
+  const first = controls[0]
+  const last = controls.at(-1)
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last?.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first?.focus()
+  }
+}
+
+let mobileQuery
+const onViewportChange = (event) => { if (!event.matches) closeSidebar() }
+const onWindowFocus = () => { void research.loadJobs() }
+onMounted(() => {
+  mobileQuery = window.matchMedia('(max-width: 760px)')
+  mobileQuery.addEventListener('change', onViewportChange)
+  window.addEventListener('focus', onWindowFocus)
+  void research.loadJobs()
+})
+onUnmounted(() => {
+  mobileQuery?.removeEventListener('change', onViewportChange)
+  window.removeEventListener('focus', onWindowFocus)
+  research.dispose()
+})
+
+function newResearch() {
+  research.newResearch()
+  reportOpen.value = false
+  closeSidebar()
+  scrollTo(0)
+  nextTick(() => composerInput.value?.focus())
+}
+
+function selectResearch(id) {
+  research.selectResearch(id)
+  reportOpen.value = false
+  closeSidebar()
+  scrollTo(0)
+}
+
+function openReport() {
+  if (!report.value) return
+  conversationScroll = typeof window === 'undefined' ? 0 : window.scrollY
+  reportOpen.value = true
+  nextTick(() => {
+    scrollTo(0)
+    reportBack.value?.focus({ preventScroll: true })
+  })
+}
+
+function closeReport() {
+  reportOpen.value = false
+  nextTick(() => {
+    scrollTo(conversationScroll)
+    reportLaunch.value?.focus({ preventScroll: true })
+  })
+}
 
 async function submitTopic() {
-  if (sending.value) return
-
-  const value = topic.value.trim()
-  if (!value) {
-    message.value = '请输入研究主题'
-    return
-  }
-
-  sending.value = true
-  message.value = ''
-  runId.value = ''
-  logs.value = []
-  report.value = ''
-
-  try {
-    await streamResearch(value, handleResearchEvent)
-  } catch (error) {
-    message.value = '研究中断：' + error.message
-  } finally {
-    sending.value = false
-  }
+  if (composerAction.value !== 'send') return
+  reportOpen.value = false
+  await research.submitTopic()
 }
 
 async function resumeTask() {
-  if (sending.value) return
+  reportOpen.value = false
+  const pending = research.resumeTask()
+  if (!resumeError.value) closeSidebar()
+  await pending
+}
 
-  const id = resumeId.value.trim()
-  if (!id) {
-    message.value = '请输入研究编号'
-    return
-  }
+function resumeActive() {
+  resumeId.value = activeResearch.value.runId
+  return resumeTask()
+}
 
-  if (!/^[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$/.test(id)) {
-    message.value = '研究编号格式不正确'
-    return
-  }
+function onComposerAction() {
+  if (composerAction.value === 'stop') return research.stopActive()
+  if (composerAction.value === 'resume') return resumeActive()
+}
 
-  sending.value = true
-  message.value = '正在恢复研究……'
-  runId.value = ''
-  logs.value = []
-  report.value = ''
-
-  try {
-    await resumeResearch(id, handleResearchEvent)
-  } catch (error) {
-    message.value = '恢复失败：' + error.message
-  } finally {
-    sending.value = false
-  }
+function onComposerEnter(event) {
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  return submitTopic()
 }
 </script>
+
 <template>
-  <div class="app-shell">
-    <header class="app-header">
-      <div>
-        <p class="eyebrow">RESEARCH WORKSPACE</p>
-        <h1>深度研究助手</h1>
+  <div class="app-shell" @keydown.esc.prevent="closeSidebar">
+    <button v-if="sidebarOpen" class="sidebar-backdrop" type="button" tabindex="-1" aria-label="关闭研究记录" @click="closeSidebar"></button>
+    <aside id="research-sidebar" ref="sidebarElement" class="sidebar" :class="{ 'sidebar-open': sidebarOpen }" :role="sidebarOpen ? 'dialog' : undefined" :aria-modal="sidebarOpen ? 'true' : undefined" aria-label="研究记录" @keydown.tab="onSidebarTab">
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">◈</span>
+        <span>深度研究助手</span>
+        <button ref="sidebarClose" class="icon-button mobile-only" type="button" aria-label="关闭研究记录" @click="closeSidebar">×</button>
       </div>
-      <span class="app-label">研究工作台</span>
-    </header>
+      <button class="new-research-button" type="button" @click="newResearch">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+        新建研究
+      </button>
+      <nav class="history-nav" aria-label="最近研究">
+        <h2 class="sidebar-label">最近研究</h2>
+        <p v-if="!history.length" class="history-empty">发起研究后，记录会显示在这里。</p>
+        <div v-for="item in history" :key="item.id" class="history-row" :class="{ 'history-item-active': activeResearch?.id === item.id }">
+          <button
+          class="history-item"
+          :aria-current="activeResearch?.id === item.id ? 'page' : undefined"
+          :title="item.topic"
+          :disabled="item.deleting"
+          type="button"
+          @click="selectResearch(item.id)"
+        >
+          <span class="history-title">{{ item.topic }}</span>
+          <span class="history-state" :class="`history-state-${item.status}`">{{ statusLabels[item.status] }}</span>
+          </button>
+          <button class="history-delete" type="button" :disabled="item.deleting" :aria-label="`删除记录：${item.topic}`" :title="item.deleting ? '正在删除' : '删除记录'" @click="research.deleteResearch(item.id)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5" /></svg>
+          </button>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <p v-if="storageNotice" class="storage-notice" role="status">{{ storageNotice }}</p>
+        <p class="local-note">研究保存在后台，当前浏览器保留缓存</p>
+      </div>
+    </aside>
 
-    <main class="workspace">
-      <section class="workspace-main" aria-label="研究操作与报告">
-        <section class="panel">
-          <h2>你想深入研究什么？</h2>
-          <p class="muted">从一个问题开始，整理一份有来源的研究报告。</p>
+    <main class="workspace" :inert="sidebarOpen || undefined">
+      <header class="workspace-header">
+        <div class="header-heading">
+          <button ref="sidebarToggle" class="icon-button mobile-only" type="button" aria-label="打开研究记录" aria-controls="research-sidebar" :aria-expanded="sidebarOpen" @click="openSidebar">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
+          </button>
+          <h1 :title="activeResearch?.topic">{{ activeResearch?.topic || '新建研究' }}</h1>
+        </div>
+        <span class="header-status" :class="{ 'is-running': activeResearch?.status === 'running' }">
+          {{ reportOpen ? '报告阅读' : activeResearch ? statusLabels[activeResearch.status] : '研究工作台' }}
+        </span>
+      </header>
 
-          <form class="form-stack" @submit.prevent="submitTopic">
-            <label for="topic">研究主题</label>
-            <textarea
-              id="topic"
-              v-model="topic"
-              :disabled="sending"
-              placeholder="描述你想研究的问题……"
-              rows="4"
-            ></textarea>
-            <button type="submit" :disabled="sending || !topic.trim()">
-              {{ sending ? '研究中……' : '开始研究' }}
-            </button>
-          </form>
-
-          <form class="form-stack restore-form" @submit.prevent="resumeTask">
-            <label for="resume-id">恢复已有研究</label>
-            <input
-              id="resume-id"
-              v-model="resumeId"
-              :disabled="sending"
-              placeholder="输入研究编号"
-            />
-            <button
-              class="secondary-button"
-              type="submit"
-              :disabled="sending || !resumeId.trim()"
-            >
-              恢复研究
-            </button>
-          </form>
-        </section>
-
-        <article class="panel report-panel">
-          <h2>研究报告</h2>
-          <pre v-if="report" class="report-text">{{ report }}</pre>
-          <p v-else class="muted">完成研究后，报告会显示在这里。</p>
-        </article>
+      <section v-if="reportOpen && report" id="report-reader" class="reader-view" aria-label="完整研究报告">
+        <div class="reader-toolbar">
+          <button ref="reportBack" class="text-button" type="button" @click="closeReport">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 5-7 7 7 7M5 12h14" /></svg>
+            返回对话
+          </button>
+          <span>完整研究报告</span>
+        </div>
+        <article class="report-content" v-html="reportHtml"></article>
       </section>
 
-      <aside class="panel progress-panel" aria-label="研究进度">
-        <h2>研究进度</h2>
-        <p class="status-text" role="status">{{ message || '等待开始研究' }}</p>
-        <p v-if="runId" class="run-id">研究编号：{{ runId }}</p>
+      <template v-else>
+        <section v-if="!activeResearch" class="welcome" aria-label="开始新的研究">
+          <div class="welcome-mark" aria-hidden="true">◈</div>
+          <p class="eyebrow">DEEP RESEARCH</p>
+          <h2>今天想深入研究什么？</h2>
+          <p>从一个问题开始，整理一份有来源的研究报告。</p>
+        </section>
 
-        <ul v-if="logs.length" class="progress-log">
-          <li v-for="(log, index) in logs" :key="index">{{ log }}</li>
-        </ul>
-        <p v-else class="muted">研究开始后，执行进度会在这里更新。</p>
-      </aside>
+        <section v-else class="conversation-column" aria-label="研究对话">
+          <div class="user-message">{{ activeResearch.topic }}</div>
+          <article class="assistant-message">
+            <div class="assistant-label"><span aria-hidden="true">◈</span>研究助手</div>
+            <details v-if="activeResearch.tasks.length" :key="activeResearch.id" class="research-progress">
+              <summary>
+                <span class="progress-dot" :class="`progress-dot-${activeResearch.status}`" aria-hidden="true"></span>
+                {{ progressLabel }}
+                <span class="progress-count">{{ completedCount }} / {{ activeResearch.tasks.length }} 项任务</span>
+              </summary>
+              <ol class="task-list">
+                <li v-for="task in activeResearch.tasks" :key="task.number" class="task-row">
+                  <span class="task-status" :class="`task-status-${task.status}`">{{ statusLabels[task.status] }}</span>
+                  <div><h3>{{ task.title }}</h3><p>{{ task.latestMessage }}</p></div>
+                </li>
+              </ol>
+            </details>
+            <p v-if="['submitting', 'queued', 'running', 'stopping', 'stopped'].includes(activeResearch.status)" class="execution-message" role="status">{{ activeResearch.message }}</p>
+            <template v-if="report">
+              <template v-if="summaryHtml">
+                <p class="summary-label">核心结论</p>
+                <div class="report-content report-summary" v-html="summaryHtml"></div>
+              </template>
+              <p v-else class="execution-message">研究报告已生成，可打开完整报告查看结论与参考来源。</p>
+              <button ref="reportLaunch" class="report-card" type="button" aria-controls="report-reader" @click="openReport">
+                <span class="report-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H5v18h14V8zM14 3v5h5M8 12h8M8 16h6" /></svg></span>
+                <span class="report-card-text"><strong>{{ activeResearch.topic }}</strong><span>阅读完整报告 · 含参考来源</span></span>
+                <svg class="report-card-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10" /></svg>
+              </button>
+            </template>
+            <p v-else-if="activeResearch.status === 'completed'" class="execution-message">研究已完成，点击右下角三角读取报告。</p>
+            <p v-if="['interrupted', 'failed'].includes(activeResearch.status)" class="error-text" role="alert">{{ activeResearch.message }}</p>
+            <details v-if="activeResearch.runId" class="run-id-details">
+              <summary>研究编号</summary>
+              <code>{{ activeResearch.runId }}</code>
+            </details>
+          </article>
+        </section>
+
+        <footer class="composer-wrap">
+          <form class="composer" @submit.prevent="submitTopic">
+            <label class="sr-only" for="research-topic">研究主题</label>
+            <textarea
+              id="research-topic"
+              ref="composerInput"
+              v-model="topic"
+              :disabled="sending || composerAction === 'resume'"
+              :placeholder="composerAction === 'resume' ? '点击右侧三角继续，或新建研究…' : activeResearch ? '输入新主题，开始另一项研究…' : '描述你想研究的问题…'"
+              rows="2"
+              @keydown.enter.exact="onComposerEnter"
+            ></textarea>
+            <div class="composer-actions">
+              <span class="composer-mode"><span aria-hidden="true">◈</span>深度研究</span>
+              <button class="send-button" :type="composerAction === 'send' ? 'submit' : 'button'" :disabled="composerDisabled" :aria-label="composerLabel" :title="composerLabel" @click="onComposerAction">
+                <svg v-if="['stop', 'stopping', 'submitting'].includes(composerAction)" class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none" /></svg>
+                <svg v-else-if="composerAction === 'resume'" class="resume-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 11 7-11 7z" fill="currentColor" stroke="none" /></svg>
+                <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>
+              </button>
+            </div>
+          </form>
+          <p v-if="inputError" class="composer-error error-text" role="alert">{{ inputError }}</p>
+          <p class="composer-hint">{{ composerHint }}</p>
+        </footer>
+      </template>
     </main>
   </div>
 </template>

@@ -34,3 +34,8 @@ outputs/
 .idea/
 .vscode/
 *.log
+
+# Local documentation and tests (not included in code updates)
+docs/
+tests/
+test/

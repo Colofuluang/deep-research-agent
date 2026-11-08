@@ -1,83 +1,135 @@
 from langgraph.graph import END, START, StateGraph
-from .nodes import plan_node, search_node, summarize_node, record_node, fetch_node, \
-    advance_node, route_after_advance, report_node, persist_node, extract_node, evaluate_node
-from .state import ResearchState
-from pathlib import Path
-from .storage import save_outputs
+from langgraph.types import Send
 
-def build_graph(checkpointer = None):
+from .nodes import (
+    collect_node,
+    decide_task_node,
+    evaluate_node,
+    execute_task_tools_node,
+    extract_node,
+    persist_node,
+    persist_report_materials_node,
+    plan_node,
+    prepare_task_node,
+    report_node,
+    route_after_decide,
+    route_after_tools,
+    select_materials_node,
+    task_persist_node,
+    task_record_node,
+    task_summarize_node,
+    task_select_materials_node,
+    task_summarize_selected_node,
+    distill_conclusions_node,
+)
+from .state import ResearchState, TaskInput, TaskOutput, TaskState
+
+
+def build_task_graph(*, legacy=False):
+    builder = StateGraph(
+        TaskState,
+        input_schema=TaskInput,
+        output_schema=TaskOutput,
+    )
+    builder.add_node("prepare", prepare_task_node)
+    builder.add_node("decide", decide_task_node)
+    builder.add_node("tools", execute_task_tools_node)
+    builder.add_node("summarize", task_summarize_node)
+    builder.add_node("record", task_record_node)
+    builder.add_node("persist", task_persist_node)
+
+    builder.add_edge(START, "prepare")
+    builder.add_edge("prepare", "decide")
+    builder.add_conditional_edges(
+        "decide",
+        route_after_decide,
+        {
+            "tools": "tools",
+            "summarize": "summarize",
+        },
+    )
+    builder.add_conditional_edges(
+        "tools",
+        route_after_tools,
+        {
+            "decide": "decide",
+            "summarize": "summarize",
+        },
+    )
+    if legacy:
+        builder.add_edge("summarize", "record")
+    else:
+        builder.add_node("select_materials", task_select_materials_node)
+        builder.add_node("summarize_selected", task_summarize_selected_node)
+        builder.add_edge("summarize", "select_materials")
+        builder.add_edge("select_materials", "summarize_selected")
+        builder.add_edge("summarize_selected", "record")
+    builder.add_edge("record", "persist")
+    builder.add_edge("persist", END)
+
+    return builder.compile()
+
+
+def dispatch_tasks(state: ResearchState) -> list[Send]:
+    return [
+        Send(
+            "research_task",
+            {
+                "topic": state["topic"],
+                "task_number": task_number,
+                "task": task,
+                "output_dir": state["output_dir"],
+            },
+        )
+        for task_number, task in enumerate(
+            state["tasks"],
+            start=1,
+        )
+    ]
+
+
+def build_graph(checkpointer=None, *, legacy=False):
     builder = StateGraph(ResearchState)
 
     builder.add_node("plan", plan_node)
-    builder.add_node("search", search_node)
-    builder.add_node("summarize", summarize_node)
-    builder.add_node("record", record_node)
-    builder.add_node("fetch", fetch_node)   
-    builder.add_node("advance", advance_node)
+
+    builder.add_node(
+        "research_task",
+        build_task_graph(legacy=legacy),
+    )
+
+    builder.add_node("collect", collect_node)
     builder.add_node("persist", persist_node)
+    if legacy:
+        builder.add_node("select_materials", select_materials_node)
+    builder.add_node("persist_report_materials", persist_report_materials_node)
     builder.add_node("report", report_node)
     builder.add_node("extract", extract_node)
     builder.add_node("evaluate", evaluate_node)
 
     builder.add_edge(START, "plan")
-    builder.add_edge("plan", "search")
-    builder.add_edge("search", "fetch")
-    builder.add_edge("fetch", "summarize")
-    builder.add_edge("summarize", "record")
-    builder.add_edge("record", "persist")
-    builder.add_edge("persist", "advance")
+
     builder.add_conditional_edges(
-        "advance", 
-        route_after_advance,
-        {
-            "search": "search",
-            "done": "report",
-        },
-    )  
+        "plan",
+        dispatch_tasks,
+        ["research_task"],
+    )
+
+    builder.add_edge("research_task", "collect")
+    builder.add_edge("collect", "persist")
+    if legacy:
+        builder.add_edge("persist", "select_materials")
+        builder.add_edge("select_materials", "persist_report_materials")
+    else:
+        builder.add_edge("persist", "persist_report_materials")
+    builder.add_edge("persist_report_materials", "report")
     builder.add_edge("report", "extract")
     builder.add_edge("extract", "evaluate")
-    builder.add_edge("evaluate", END)
+    if legacy:
+        builder.add_edge("evaluate", END)
+    else:
+        builder.add_node("distill_conclusions", distill_conclusions_node)
+        builder.add_edge("evaluate", "distill_conclusions")
+        builder.add_edge("distill_conclusions", END)
 
     return builder.compile(checkpointer=checkpointer)
-
-if __name__ == "__main__":
-    graph = build_graph()
-    
-    output_dir = Path(__file__).resolve().parents[2] / "outputs"
-
-    result = graph.invoke({
-        "topic": "如何为个人 Markdown 笔记构建支持来源引用的问答 Agent？",
-        "task_index": 0,
-        "completed_research": [],
-        "output_dir": str(output_dir),
-    })
-    save_outputs(result, output_dir)
-
-    print("研究成果已保存到：", output_dir)
-
-    print("研究主题：", result["topic"])
-
-    for index, task in enumerate(result["tasks"], start=1):
-        print(f"\n任务 {index}：{task.title}")
-        print(f"研究目的：{task.intent}")
-        print(f"搜索查询：{task.query}")
-
-    for index, research in enumerate(result["completed_research"], start=1):
-        print(f"\n--- 任务 {index} 的研究结果：{research.task.title} ---")
-
-        print("搜索资料：")
-        if not research.sources:
-            print("没有可用的搜索资料")
-
-        for source_index, source in enumerate(research.sources, start=1):
-            print(f"[{source_index}] {source.title}")
-            print("链接：", source.url)
-            print("摘要：", source.snippet)
-
-        print("\n初步总结：")
-        print(research.summary)
-
-    print("已保存的研究记录数：", len(result["completed_research"]))
-
-    print("\n--- 最终研究报告 ---")
-    print(result["final_report"])
